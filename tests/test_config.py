@@ -1,7 +1,7 @@
 """Unit tests for environment configuration (TRD §10).
 
-Pure-logic tests: no database and no Gemini API required. ``load_dotenv_file`` is
-disabled so results depend only on the monkeypatched environment.
+Pure-logic tests: no database and no embedding model required. ``load_dotenv_file``
+is disabled so results depend only on the monkeypatched environment.
 """
 from __future__ import annotations
 
@@ -12,10 +12,10 @@ from linker.config import Config, ConfigError
 
 @pytest.fixture
 def base_env(monkeypatch):
-    """Set the two required variables; individual tests tweak the rest."""
-    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+    """Set the required variable; individual tests tweak the rest."""
     monkeypatch.setenv("DATABASE_URL", "postgresql://u:p@localhost:5432/linker")
-    for optional in ("EMBED_MODEL", "EMBED_DIM", "EMBED_BATCH_SIZE", "EMBED_THROTTLE_SECONDS"):
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    for optional in ("EMBED_MODEL", "EMBED_DIM", "EMBED_BATCH_SIZE"):
         monkeypatch.delenv(optional, raising=False)
 
 
@@ -25,20 +25,30 @@ def _load() -> Config:
 
 def test_defaults(base_env):
     config = _load()
-    assert config.gemini_api_key == "test-key"
-    assert config.embed_model == "gemini-embedding-001"
+    assert config.embed_model == "BAAI/bge-base-en-v1.5"
     assert config.embed_dim == 768
-    assert config.embed_batch_size == 100
-    assert config.embed_throttle_seconds == 0.5
+    assert config.embed_batch_size == 32
+    # Gemini key is optional (embeddings are local); absent -> empty string.
+    assert config.gemini_api_key == ""
 
 
-def test_missing_required_lists_all(monkeypatch):
-    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+def test_gemini_key_kept_when_present(base_env, monkeypatch):
+    # Embeddings don't use it, but the M3 LLM gate does, so it is still loaded.
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+    assert _load().gemini_api_key == "test-key"
+
+
+def test_missing_database_url_rejected(monkeypatch):
     monkeypatch.delenv("DATABASE_URL", raising=False)
     with pytest.raises(ConfigError) as exc:
         _load()
-    assert "GEMINI_API_KEY" in str(exc.value)
     assert "DATABASE_URL" in str(exc.value)
+
+
+def test_missing_gemini_key_is_allowed(base_env, monkeypatch):
+    # M1 ingestion is fully local; a missing Gemini key must not block it.
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    assert _load().gemini_api_key == ""
 
 
 def test_invalid_embed_dim_rejected(base_env, monkeypatch):
@@ -53,23 +63,17 @@ def test_nonpositive_embed_dim_rejected(base_env, monkeypatch):
         _load()
 
 
-def test_batch_size_out_of_range_rejected(base_env, monkeypatch):
-    monkeypatch.setenv("EMBED_BATCH_SIZE", "101")
-    with pytest.raises(ConfigError):
-        _load()
-
-
-def test_negative_throttle_rejected(base_env, monkeypatch):
-    monkeypatch.setenv("EMBED_THROTTLE_SECONDS", "-1")
+def test_nonpositive_batch_size_rejected(base_env, monkeypatch):
+    monkeypatch.setenv("EMBED_BATCH_SIZE", "0")
     with pytest.raises(ConfigError):
         _load()
 
 
 def test_custom_values_parsed(base_env, monkeypatch):
-    monkeypatch.setenv("EMBED_DIM", "1536")
-    monkeypatch.setenv("EMBED_BATCH_SIZE", "50")
-    monkeypatch.setenv("EMBED_THROTTLE_SECONDS", "0")
+    monkeypatch.setenv("EMBED_MODEL", "BAAI/bge-large-en-v1.5")
+    monkeypatch.setenv("EMBED_DIM", "1024")
+    monkeypatch.setenv("EMBED_BATCH_SIZE", "64")
     config = _load()
-    assert config.embed_dim == 1536
-    assert config.embed_batch_size == 50
-    assert config.embed_throttle_seconds == 0.0
+    assert config.embed_model == "BAAI/bge-large-en-v1.5"
+    assert config.embed_dim == 1024
+    assert config.embed_batch_size == 64

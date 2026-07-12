@@ -6,8 +6,10 @@ client's existing published blog library (Postgres + pgvector) and returns ranke
 link suggestions — each with the blog to link to, verbatim anchor text, and the
 paragraph where the link belongs. See [`PRD.md`](PRD.md) and [`TRD.md`](TRD.md).
 
-Stack: **Python 3.11+**, **Postgres 16 + pgvector**, **Gemini API** (embeddings +
-Flash), **Google Docs API** (read). Free-tier friendly, single client to start.
+Stack: **Python 3.11+**, **Postgres 16 + pgvector**, **local embeddings**
+(`BAAI/bge-base-en-v1.5`, 768-d, via sentence-transformers), **Gemini API**
+(Flash — LLM relevance gate, M3+), **Google Docs API** (read). Free-tier
+friendly, single client to start.
 
 ## Build status
 
@@ -31,18 +33,22 @@ Flash), **Google Docs API** (read). Free-tier friendly, single client to start.
 ├── linker/
 │   ├── config.py          # env-based configuration
 │   ├── chunking.py        # split blog content into chunks (TRD §5)
-│   ├── embeddings.py      # Gemini embedding client (batch + backoff)
+│   ├── embeddings.py      # local embedder (sentence-transformers, bge)
 │   ├── db.py              # Postgres + pgvector access layer
 │   └── ingest.py          # ingestion pipeline (TRD §4)
 └── tests/
-    └── test_chunking.py   # chunking unit tests (no DB/API needed)
+    ├── test_chunking.py   # chunking unit tests (no DB/model needed)
+    ├── test_config.py     # config unit tests
+    ├── test_embeddings.py # embedder task-split tests (fake model)
+    └── test_ingest.py     # ingest planning / blank-row filter tests
 ```
 
 ## Prerequisites
 
 - **Python 3.11+**
 - **Postgres 16** with the **pgvector** extension
-- A **Gemini API key** — https://aistudio.google.com/apikey
+- A **Gemini API key** — https://aistudio.google.com/apikey (needed only from M3
+  onwards, for the LLM relevance gate; ingestion embeds locally and needs no key)
 
 ### Install Postgres 16 + pgvector
 
@@ -80,15 +86,20 @@ source .venv/bin/activate
 pip install -r requirements-dev.txt
 
 cp .env.example .env
-# then edit .env: set GEMINI_API_KEY and DATABASE_URL
+# then edit .env: set DATABASE_URL (GEMINI_API_KEY is only needed from M3)
 ```
 
 Config lives entirely in `.env` (loaded via python-dotenv). Never commit `.env`.
 
-> **Model names change.** `EMBED_MODEL` defaults to `gemini-embedding-001` (768-d)
-> and `LLM_MODEL` to `gemini-flash-latest`. Verify the current models at build
-> time; ingestion runs a one-off embedding smoke test that fails fast if the
-> configured model/key/dimension is wrong.
+> **First run downloads the embedding model.** `EMBED_MODEL` defaults to the local
+> `BAAI/bge-base-en-v1.5` (768-d). The first ingest downloads it (~hundreds of MB)
+> and caches it under `~/.cache/huggingface`; this is a **one-time** cost — every
+> later run loads it from disk and embeds fully offline, with no API key or rate
+> limit. Ingestion runs a one-off embedding smoke test that fails fast if the
+> configured model/dimension is wrong.
+>
+> **Model names change.** `LLM_MODEL` (M3+) defaults to `gemini-flash-latest`;
+> verify the current free-tier Flash model at build time.
 
 ## Run: ingest the blog corpus (M1)
 
@@ -96,17 +107,24 @@ Config lives entirely in `.env` (loaded via python-dotenv). Never commit `.env`.
 python cli.py ingest --client gokwik --file "Gokwik content.xlsx"
 ```
 
-This reads each row (`link`, `title`, `content`), chunks the content, embeds the
-chunks with Gemini (`task_type=RETRIEVAL_DOCUMENT`), and stores pages + chunks.
-Re-running is idempotent (each page's chunks are delete-then-inserted).
+This reads each row (`link`, `title`, `content`), **drops content-less rows**
+(the corpus has ~835 blank trailing rows), chunks the content, embeds the chunks
+locally with `bge-base-en-v1.5` (document task, no query prefix), and stores
+pages + chunks. Re-running is idempotent (each page's chunks are
+delete-then-inserted).
 
-Expected summary:
+Expected summary (~2,312 chunks across the 167 content-bearing posts):
 
 ```
 Pages ingested  : 167
-Chunks created  : <several per page>
+Chunks created  : ~2312
 Skipped rows    : 0
+Blank rows      : 835 (empty spreadsheet rows, ignored)
 ```
+
+> **Switched embedding models?** Vectors from different models are not comparable.
+> If you previously ingested with another model, wipe first so the two never mix:
+> `TRUNCATE chunks;` (or drop/recreate the table) and re-run the ingest.
 
 ### Verify the ingest (M1 acceptance — TRD §11)
 

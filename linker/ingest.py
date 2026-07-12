@@ -1,8 +1,8 @@
 """Ingestion pipeline (TRD §4/§5).
 
 Reads a blog corpus (``.xlsx``/``.csv`` with columns ``link, title, content``),
-chunks each article, embeds the chunks with Gemini (``RETRIEVAL_DOCUMENT``), and
-stores pages + chunks in Postgres for a client.
+chunks each article, embeds the chunks with a local model (``TASK_DOCUMENT``),
+and stores pages + chunks in Postgres for a client.
 
 Flow: read rows -> chunk (pure) -> embed everything in batches -> write pages +
 chunks in one transaction. Chunking/embedding happen before any DB write, so a
@@ -21,7 +21,7 @@ from openpyxl import load_workbook
 from . import db
 from .chunking import chunk_content, embedding_input
 from .config import Config, ConfigError
-from .embeddings import TASK_DOCUMENT, GeminiEmbedder
+from .embeddings import TASK_DOCUMENT, LocalEmbedder
 
 log = logging.getLogger(__name__)
 
@@ -146,15 +146,18 @@ def _plan_pages(rows: list[_Row], stats: IngestStats) -> list[_PendingPage]:
     """Chunk every row (no DB, no network) and record skipped/zero-chunk rows."""
     pending: list[_PendingPage] = []
     for row in rows:
+        # Drop content-less rows BEFORE chunking/embedding: the corpus has ~835
+        # blank trailing spreadsheet rows with no real content. Only content-
+        # bearing posts should reach the embedder (M1 fix). Whitespace-only
+        # content counts as blank.
+        if not row.content.strip():
+            stats.blank_rows += 1
+            continue
         if not row.url:
-            # A page is keyed by its URL, so a row without one cannot be ingested.
-            # Fully-empty rows are just blank spreadsheet rows (skip silently);
-            # a row that carries title/content but no link is a real anomaly.
-            if not row.title and not row.content:
-                stats.blank_rows += 1
-            else:
-                stats.skipped_rows += 1
-                log.warning("Skipping row with content but no link (title=%r)", row.title[:60])
+            # A page is keyed by its URL, so a row with content but no link
+            # cannot be ingested — that is a real anomaly, not a blank row.
+            stats.skipped_rows += 1
+            log.warning("Skipping row with content but no link (title=%r)", row.title[:60])
             continue
         chunks = chunk_content(row.content)
         pending_chunks = [
@@ -200,9 +203,9 @@ def ingest_file(
     embed_inputs = [chunk.embed_input for page in pending for chunk in page.chunks]
 
     # Connect first so DB problems (unreachable URL, EMBED_DIM != schema's vector
-    # dimension) fail fast with ZERO embedding cost, before the rate-limited,
-    # daily-capped embedding budget is spent. The connection then stays idle
-    # (no open transaction) during embedding and is reused for the write.
+    # dimension) fail fast before the model is loaded and the corpus embedded.
+    # The connection then stays idle (no open transaction) during embedding and
+    # is reused for the write.
     conn = db.connect(config.database_url)
     try:
         schema_dim = db.embedding_column_dim(conn)
@@ -214,12 +217,10 @@ def ingest_file(
             )
         conn.rollback()  # end the read transaction opened during connect/validation
 
-        embedder = GeminiEmbedder(
-            config.gemini_api_key,
+        embedder = LocalEmbedder(
             config.embed_model,
             config.embed_dim,
             batch_size=config.embed_batch_size,
-            throttle_seconds=config.embed_throttle_seconds,
         )
         if verify_model:
             observed = embedder.smoke_test()

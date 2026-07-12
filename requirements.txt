@@ -1,7 +1,8 @@
 # Runtime dependencies
-google-genai>=1.0.0        # Gemini embeddings + LLM (google-genai SDK)
+sentence-transformers>=3.0 # local embeddings (BAAI/bge-base-en-v1.5, 768-d)
+google-genai>=1.0.0        # Gemini LLM relevance gate + anchor (M3 onwards)
 psycopg[binary]>=3.1       # Postgres driver (psycopg 3)
 pgvector>=0.3.0            # vector type adapter for psycopg
-numpy>=1.26                # embedding vectors + L2 normalization
+numpy>=1.26                # embedding vectors
 openpyxl>=3.1              # read the .xlsx blog corpus
 python-dotenv>=1.0         # load .env configuration
