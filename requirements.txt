@@ -6,3 +6,9 @@ pgvector>=0.3.0            # vector type adapter for psycopg
 numpy>=1.26                # embedding vectors
 openpyxl>=3.1              # read the .xlsx blog corpus
 python-dotenv>=1.0         # load .env configuration
+
+# Web UI (TRD §9 v2)
+fastapi>=0.110             # thin HTTP layer over the matcher
+uvicorn[standard]>=0.27    # ASGI server for `cli.py serve`
+jinja2>=3.1                # render the results template
+python-multipart>=0.0.9    # parse the HTML form POST

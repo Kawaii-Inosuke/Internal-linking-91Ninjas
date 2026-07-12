@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Internal Linking Assistant</title>
+  <style>
+    :root { color-scheme: light dark; }
+    * { box-sizing: border-box; }
+    body {
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+      max-width: 860px; margin: 2rem auto; padding: 0 1rem; line-height: 1.5;
+    }
+    h1 { font-size: 1.4rem; margin-bottom: 0.25rem; }
+    p.sub { color: #6b7280; margin-top: 0; }
+    form { display: grid; gap: 0.9rem; margin: 1.5rem 0; }
+    label { font-weight: 600; display: block; margin-bottom: 0.3rem; }
+    input, textarea {
+      width: 100%; padding: 0.55rem 0.65rem; font: inherit;
+      border: 1px solid #9ca3af; border-radius: 6px; background: transparent; color: inherit;
+    }
+    textarea { min-height: 190px; resize: vertical; }
+    .row { display: flex; gap: 0.9rem; flex-wrap: wrap; }
+    .row > div { flex: 1 1 220px; }
+    button {
+      justify-self: start; padding: 0.55rem 1.2rem; font: inherit; font-weight: 600;
+      border: 0; border-radius: 6px; background: #2563eb; color: #fff; cursor: pointer;
+    }
+    button:hover { background: #1d4ed8; }
+    table { border-collapse: collapse; width: 100%; margin-top: 0.5rem; }
+    th, td { text-align: left; padding: 0.5rem 0.6rem; border-bottom: 1px solid #d1d5db; vertical-align: top; }
+    th { font-size: 0.82rem; text-transform: uppercase; letter-spacing: 0.03em; color: #6b7280; }
+    td a { color: #2563eb; word-break: break-all; }
+    .badge { display: inline-block; padding: 0.1rem 0.5rem; border-radius: 999px; background: #dcfce7; color: #166534; font-size: 0.8rem; font-weight: 600; }
+    .result { margin-top: 1.75rem; }
+    .note { padding: 0.8rem 1rem; border-radius: 8px; background: rgba(148,163,184,0.15); border: 1px solid #cbd5e1; }
+    .note.empty { background: rgba(251,191,36,0.12); border-color: #f59e0b; }
+  </style>
+</head>
+<body>
+  <h1>Internal Linking Assistant</h1>
+  <p class="sub">M2 — exact-keyword pass. Paste a new post, give it a keyword, and find the best existing post to link to.</p>
+
+  <form method="post" action="/suggest">
+    <div class="row">
+      <div>
+        <label for="client">Client</label>
+        <input id="client" name="client" value="{{ form.client or 'gokwik' }}" required />
+      </div>
+      <div>
+        <label for="keyword">Keyword (anchor intent)</label>
+        <input id="keyword" name="keyword" value="{{ form.keyword or '' }}" placeholder="cart abandonment" required />
+      </div>
+    </div>
+    <div>
+      <label for="url">Post URL (optional — excluded from its own targets)</label>
+      <input id="url" name="url" value="{{ form.url or '' }}" placeholder="https://.../new-post" />
+    </div>
+    <div>
+      <label for="post_text">New post text</label>
+      <textarea id="post_text" name="post_text" placeholder="Paste the blog post here, one paragraph per line…" required>{{ form.post_text or '' }}</textarea>
+    </div>
+    <button type="submit">Suggest links</button>
+  </form>
+
+  {% if result is not none %}
+  <div class="result">
+    {% if result.suggestions %}
+      <table>
+        <thead>
+          <tr>
+            <th>Target URL</th>
+            <th>Target title</th>
+            <th>Anchor text</th>
+            <th>Paragraph</th>
+            <th>Type</th>
+            <th>Confidence</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for s in result.suggestions %}
+          <tr>
+            <td><a href="{{ s.target_url }}" target="_blank" rel="noopener">{{ s.target_url }}</a></td>
+            <td>{{ s.target_title or '—' }}</td>
+            <td>{{ s.anchor_text }}</td>
+            <td>{{ s.doc_paragraph_index }}</td>
+            <td><span class="badge">{{ s.match_type }}</span></td>
+            <td>{{ '%.2f'|format(s.confidence) }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    {% else %}
+      <div class="note empty">No suggestion: {{ result.message }}</div>
+    {% endif %}
+  </div>
+  {% endif %}
+</body>
+</html>

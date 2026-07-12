@@ -16,31 +16,39 @@ friendly, single client to start.
 | Milestone | Scope | Status |
 |---|---|---|
 | **M1** | DB schema + ingestion of the blog corpus | ✅ implemented |
-| M2 | Exact-keyword matching + `suggest` CLI | ⬜ next |
-| M3 | Semantic + hybrid + RRF + LLM gate | ⬜ |
+| **M2** | Exact-keyword matching (`suggest`) + thin web UI | ✅ implemented |
+| M3 | Semantic + hybrid + RRF + LLM gate | ⬜ next |
 | M4 / M4b | Google Docs read + auto-save the processed post | ⬜ |
-| M5 / M6 | FastAPI web UI / write-back (optional) | ⬜ |
+| M6 | Write links back into the Doc (optional) | ⬜ |
+
+> The FastAPI UI (TRD's Phase-2 stack) is pulled forward into M2 as a thin front
+> door over the same matcher; M3 deepens the matching behind it.
 
 ## Repository layout
 
 ```
 .
-├── cli.py                 # CLI entry point (M1: `ingest`)
+├── cli.py                 # CLI entry point (`ingest`, `suggest`, `serve`)
+├── app.py                 # FastAPI web UI (thin wrapper over the matcher)
 ├── schema.sql             # Postgres schema (idempotent)
 ├── requirements.txt       # runtime deps
 ├── requirements-dev.txt   # + pytest
 ├── .env.example           # config template (copy to .env)
+├── templates/
+│   └── index.html         # single-page suggest form + results table
 ├── linker/
 │   ├── config.py          # env-based configuration
 │   ├── chunking.py        # split blog content into chunks (TRD §5)
 │   ├── embeddings.py      # local embedder (sentence-transformers, bge)
 │   ├── db.py              # Postgres + pgvector access layer
+│   ├── matcher.py         # matching engine — exact-keyword pass (TRD §6 A)
 │   └── ingest.py          # ingestion pipeline (TRD §4)
 └── tests/
     ├── test_chunking.py   # chunking unit tests (no DB/model needed)
     ├── test_config.py     # config unit tests
     ├── test_embeddings.py # embedder task-split tests (fake model)
-    └── test_ingest.py     # ingest planning / blank-row filter tests
+    ├── test_ingest.py     # ingest planning / blank-row filter tests
+    └── test_matcher.py    # exact-pass ranking + first-occurrence anchor tests
 ```
 
 ## Prerequisites
@@ -141,14 +149,58 @@ WHERE NOT EXISTS (SELECT 1 FROM chunks ch WHERE ch.page_id = p.id);  -- expect 0
 SELECT count(*) FROM chunks WHERE embedding IS NULL;                 -- expect 0
 ```
 
+## Suggest internal links (M2 — exact-keyword pass)
+
+Given a keyword, the new post's text, and its final URL, M2 runs the exact-keyword
+pass (TRD §6 Step A): it finds the best existing post to link the keyword to
+(keyword-in-title first, then chunk match count; the post is never linked to
+itself) and the first paragraph of the new post where the keyword appears. The
+matching logic lives in `linker/matcher.py`; the CLI and the web UI are two thin
+front doors over the **same** function.
+
+The new post is supplied as pasted text or a `.txt`/`.md` file (the TRD §8
+fallback — the Google Docs reader arrives in M4). M2 is **read-only**: it does not
+save the post to the DB (that auto-save is M4b).
+
+### CLI
+
+```bash
+python cli.py suggest --client gokwik --keyword "cart abandonment" \
+                      --file new_post.txt --url https://gokwik.co/blog/new-post
+# or pass text inline instead of --file:
+python cli.py suggest --client gokwik --keyword "cart abandonment" \
+                      --text "…post body…" --url https://gokwik.co/blog/new-post
+```
+
+Prints a table and writes `suggestions.json`. `--url` is the post's final live URL
+(excluded from its own target selection). Example:
+
+```
+PARA  CONF  ANCHOR                    TARGET
+   1  1.00  cart abandonment          https://www.gokwik.co/blog/how-to-avoid-and-overcome-cart-abandonment-losses
+```
+
+### Web UI
+
+```bash
+python cli.py serve            # -> http://127.0.0.1:8000  (or: uvicorn app:app)
+```
+
+Open http://localhost:8000, paste the post, enter the keyword and URL, and submit.
+The page renders the same suggestions as a table (target URL, title, anchor,
+paragraph index, confidence). `GET /health` returns `{"status":"ok"}`.
+
 ## Tests
 
 ```bash
-pytest                    # runs tests/ (chunking tests need no DB/API)
+pytest                    # runs tests/ — all pure-logic, no DB/model/API needed
 ```
 
-More tests (RRF fusion, anchor validation, threshold, client isolation) land with
-their milestones (M2/M3), per TRD §12.
+Current suites: chunking boundaries, config parsing, the embedder document/query
+task split (fake model), the ingest blank-row filter, and the M2 matcher
+(exact-pass ranking + first-occurrence anchor, with `suggest` orchestration over a
+fake DB layer). More tests (RRF fusion, anchor validation, threshold) land with
+M3, per TRD §12.
 
 ## Security
 

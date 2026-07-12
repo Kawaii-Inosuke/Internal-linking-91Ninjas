@@ -8,6 +8,7 @@ atomic. :func:`ensure_schema` is the exception: DDL is committed on apply.
 from __future__ import annotations
 
 from collections.abc import Iterable
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -20,14 +21,28 @@ SCHEMA_PATH = Path(__file__).resolve().parent.parent / "schema.sql"
 ChunkRow = tuple[int, str, np.ndarray]  # (chunk_index, content, embedding)
 
 
-def connect(database_url: str) -> psycopg.Connection:
-    """Open a Postgres connection with the schema applied and pgvector registered.
+@dataclass(frozen=True)
+class ExactTarget:
+    """A candidate target page from the exact-keyword pass (TRD §6 Step A)."""
 
-    The ``vector`` extension must exist before the type can be registered, so
-    :func:`ensure_schema` runs first.
+    page_id: int
+    url: str
+    title: str | None
+    hits: int  # number of the page's chunks whose content contains the keyword
+    in_title: bool  # whether the keyword appears in the page title
+
+
+def connect(database_url: str, *, apply_schema: bool = True) -> psycopg.Connection:
+    """Open a Postgres connection with pgvector registered.
+
+    When ``apply_schema`` is True (the default, used by ingestion) the schema is
+    applied first so the ``vector`` extension exists before the type is
+    registered. Read paths that assume an already-provisioned database (e.g. the
+    ``suggest`` matcher) pass ``apply_schema=False`` to skip the DDL round-trip.
     """
     conn = psycopg.connect(database_url)
-    ensure_schema(conn)
+    if apply_schema:
+        ensure_schema(conn)
     register_vector(conn)
     return conn
 
@@ -110,6 +125,63 @@ def insert_chunks(
             [(client_id, page_id, ci, content, emb) for ci, content, emb in rows],
         )
     return len(rows)
+
+
+def get_client_id(conn: psycopg.Connection, name: str) -> int | None:
+    """Return the id of the client named ``name``, or None if it does not exist.
+
+    Read-only counterpart to :func:`upsert_client` (which would create the row).
+    Used by the matcher to resolve a client name to the ``client_id`` that every
+    downstream query filters on.
+    """
+    with conn.cursor() as cur:
+        cur.execute("SELECT id FROM clients WHERE name = %s", (name,))
+        row = cur.fetchone()
+    return row[0] if row else None
+
+
+def find_exact_target_candidates(
+    conn: psycopg.Connection,
+    client_id: int,
+    keyword: str,
+    current_url: str | None,
+) -> list[ExactTarget]:
+    """Return up to 3 candidate target pages for the exact-keyword pass (TRD §6 A).
+
+    Ranks pages of ``client_id`` whose chunk content contains ``keyword``
+    (case-insensitive substring), preferring a keyword-in-title match and then a
+    higher chunk match count. The current post's own URL is excluded so a post is
+    never linked to itself (``p.url IS DISTINCT FROM :current_url``; a NULL
+    ``current_url`` excludes nothing). Every filter is scoped by ``client_id`` —
+    no cross-client results.
+    """
+    kw_like = f"%{keyword}%"
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT p.id, p.url, p.title, count(*) AS hits,
+                   bool_or(p.title ILIKE %(kw_like)s) AS in_title
+            FROM chunks c JOIN pages p ON p.id = c.page_id
+            WHERE c.client_id = %(cid)s
+              AND p.url IS DISTINCT FROM %(current_url)s
+              AND c.content ILIKE %(kw_like)s
+            GROUP BY p.id, p.url, p.title
+            ORDER BY in_title DESC, hits DESC
+            LIMIT 3
+            """,
+            {"kw_like": kw_like, "cid": client_id, "current_url": current_url},
+        )
+        rows = cur.fetchall()
+    return [
+        ExactTarget(
+            page_id=row[0],
+            url=row[1],
+            title=row[2],
+            hits=row[3],
+            in_title=bool(row[4]),
+        )
+        for row in rows
+    ]
 
 
 def embedding_column_dim(conn: psycopg.Connection) -> int | None:
