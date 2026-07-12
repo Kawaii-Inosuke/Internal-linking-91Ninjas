@@ -1,0 +1,7 @@
+# Runtime dependencies
+google-genai>=1.0.0        # Gemini embeddings + LLM (google-genai SDK)
+psycopg[binary]>=3.1       # Postgres driver (psycopg 3)
+pgvector>=0.3.0            # vector type adapter for psycopg
+numpy>=1.26                # embedding vectors + L2 normalization
+openpyxl>=3.1              # read the .xlsx blog corpus
+python-dotenv>=1.0         # load .env configuration

@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.venv/
+venv/
+
+# Environment & secrets — never commit credentials
+.env
+service-account.json
+*service-account*.json
+*.credentials.json
+
+# Tool output
+suggestions.json
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+
+# Claude Code local session state
+.claude/
