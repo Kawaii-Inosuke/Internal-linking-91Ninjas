@@ -23,13 +23,23 @@ ChunkRow = tuple[int, str, np.ndarray]  # (chunk_index, content, embedding)
 
 @dataclass(frozen=True)
 class ExactTarget:
-    """A candidate target page from the exact-keyword pass (TRD §6 Step A)."""
+    """A candidate target page from the exact-keyword pass (TRD §6 Step A).
+
+    Carries the raw signal material the matcher blends into a heuristic relevance
+    score (see :func:`linker.matcher.rank_candidates`). ``matched_content`` is the
+    page's keyword-bearing chunks joined in document order — used to locate the
+    first occurrence and to look for the keyword in a heading. The defaults on the
+    signal fields keep older call sites and tests that only set the ranking-neutral
+    fields working.
+    """
 
     page_id: int
     url: str
     title: str | None
     hits: int  # number of the page's chunks whose content contains the keyword
     in_title: bool  # whether the keyword appears in the page title
+    first_chunk_index: int = 0  # index of the earliest chunk that contains the keyword
+    matched_content: str = ""  # the keyword-bearing chunks, joined in document order
 
 
 def connect(database_url: str, *, apply_schema: bool = True) -> psycopg.Connection:
@@ -145,31 +155,51 @@ def find_exact_target_candidates(
     client_id: int,
     keyword: str,
     current_url: str | None,
+    limit: int,
 ) -> list[ExactTarget]:
-    """Return up to 3 candidate target pages for the exact-keyword pass (TRD §6 A).
+    """Return the candidate target pages for the exact-keyword pass (TRD §6 A).
 
-    Ranks pages of ``client_id`` whose chunk content contains ``keyword``
-    (case-insensitive substring), preferring a keyword-in-title match and then a
-    higher chunk match count. The current post's own URL is excluded so a post is
-    never linked to itself (``p.url IS DISTINCT FROM :current_url``; a NULL
-    ``current_url`` excludes nothing). Every filter is scoped by ``client_id`` —
-    no cross-client results.
+    This is the TRD §6 Step A base query — pages of ``client_id`` whose chunk
+    content contains ``keyword`` (case-insensitive substring), excluding the
+    current post's own URL (``p.url IS DISTINCT FROM :current_url``; a NULL
+    ``current_url`` excludes nothing) — widened to return a candidate *pool*
+    (capped at ``limit``) rather than a single winner, so the matcher can re-rank
+    it by relevance signals. Every filter is scoped by ``client_id`` — no
+    cross-client results.
+
+    Alongside the original ``hits``/``in_title`` signals it returns, per page:
+      * ``first_chunk_index`` — the lowest chunk index that contains the keyword
+        (a coarse "how early in the post" proxy), and
+      * ``matched_content`` — that page's keyword-bearing chunks joined in
+        document order, so the matcher can pinpoint the first occurrence and scan
+        for the keyword in a heading without a second round-trip.
+
+    The pool is ordered by the original ``in_title DESC, hits DESC`` so that when
+    it is smaller than the number of matching pages, the strongest-by-the-old-
+    heuristic pages are the ones kept for re-ranking.
     """
     kw_like = f"%{keyword}%"
     with conn.cursor() as cur:
         cur.execute(
             """
             SELECT p.id, p.url, p.title, count(*) AS hits,
-                   bool_or(p.title ILIKE %(kw_like)s) AS in_title
+                   bool_or(p.title ILIKE %(kw_like)s) AS in_title,
+                   min(c.chunk_index) AS first_chunk_index,
+                   string_agg(c.content, E'\\n' ORDER BY c.chunk_index) AS matched_content
             FROM chunks c JOIN pages p ON p.id = c.page_id
             WHERE c.client_id = %(cid)s
               AND p.url IS DISTINCT FROM %(current_url)s
               AND c.content ILIKE %(kw_like)s
             GROUP BY p.id, p.url, p.title
             ORDER BY in_title DESC, hits DESC
-            LIMIT 3
+            LIMIT %(limit)s
             """,
-            {"kw_like": kw_like, "cid": client_id, "current_url": current_url},
+            {
+                "kw_like": kw_like,
+                "cid": client_id,
+                "current_url": current_url,
+                "limit": limit,
+            },
         )
         rows = cur.fetchall()
     return [
@@ -179,6 +209,8 @@ def find_exact_target_candidates(
             title=row[2],
             hits=row[3],
             in_title=bool(row[4]),
+            first_chunk_index=row[5] or 0,
+            matched_content=row[6] or "",
         )
         for row in rows
     ]

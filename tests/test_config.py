@@ -15,7 +15,7 @@ def base_env(monkeypatch):
     """Set the required variable; individual tests tweak the rest."""
     monkeypatch.setenv("DATABASE_URL", "postgresql://u:p@localhost:5432/linker")
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
-    for optional in ("EMBED_MODEL", "EMBED_DIM", "EMBED_BATCH_SIZE"):
+    for optional in ("EMBED_MODEL", "EMBED_DIM", "EMBED_BATCH_SIZE", "EXACT_MAX_RESULTS"):
         monkeypatch.delenv(optional, raising=False)
 
 
@@ -28,6 +28,7 @@ def test_defaults(base_env):
     assert config.embed_model == "BAAI/bge-base-en-v1.5"
     assert config.embed_dim == 768
     assert config.embed_batch_size == 32
+    assert config.exact_max_results == 8
     # Gemini key is optional (embeddings are local); absent -> empty string.
     assert config.gemini_api_key == ""
 
@@ -67,6 +68,17 @@ def test_nonpositive_batch_size_rejected(base_env, monkeypatch):
     monkeypatch.setenv("EMBED_BATCH_SIZE", "0")
     with pytest.raises(ConfigError):
         _load()
+
+
+def test_nonpositive_exact_max_results_rejected(base_env, monkeypatch):
+    monkeypatch.setenv("EXACT_MAX_RESULTS", "0")
+    with pytest.raises(ConfigError):
+        _load()
+
+
+def test_custom_exact_max_results_parsed(base_env, monkeypatch):
+    monkeypatch.setenv("EXACT_MAX_RESULTS", "5")
+    assert _load().exact_max_results == 5
 
 
 def test_custom_values_parsed(base_env, monkeypatch):

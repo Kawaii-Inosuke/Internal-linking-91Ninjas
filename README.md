@@ -152,15 +152,26 @@ SELECT count(*) FROM chunks WHERE embedding IS NULL;                 -- expect 0
 ## Suggest internal links (M2 — exact-keyword pass)
 
 Given a keyword, the new post's text, and its final URL, M2 runs the exact-keyword
-pass (TRD §6 Step A): it finds the best existing post to link the keyword to
-(keyword-in-title first, then chunk match count; the post is never linked to
-itself) and the first paragraph of the new post where the keyword appears. The
-matching logic lives in `linker/matcher.py`; the CLI and the web UI are two thin
-front doors over the **same** function.
+pass (TRD §6 Step A) and returns a **ranked, scored shortlist** of the existing
+posts that contain the keyword (the post is never linked to itself), so a human
+can judge and pick. Every candidate literally contains the keyword, so the
+**score (0–10)** is a *heuristic relevance* score — how canonical each post is for
+the keyword — **not** a probability. It blends a few signals: keyword in the title
+(strongest), keyword in a heading, the keyword appearing early in the post, and —
+log-dampened and weakest — how often it appears. So a canonical "what is X" guide
+outranks a comparison post that merely repeats the phrase. Each row shows which
+signals fired and the first paragraph of the new post where the keyword appears.
+The shortlist size is capped by `EXACT_MAX_RESULTS` (default 8).
+
+The signal weights are named constants at the top of `linker/matcher.py`; the CLI
+and the web UI are two thin front doors over the **same** ranking function.
 
 The new post is supplied as pasted text or a `.txt`/`.md` file (the TRD §8
 fallback — the Google Docs reader arrives in M4). M2 is **read-only**: it does not
 save the post to the DB (that auto-save is M4b).
+
+> These are **candidates to choose from** — the writer should pick the 1–3 best
+> fits, not link all of them. Linking every near-duplicate is link-stuffing.
 
 ### CLI
 
@@ -172,12 +183,15 @@ python cli.py suggest --client gokwik --keyword "cart abandonment" \
                       --text "…post body…" --url https://gokwik.co/blog/new-post
 ```
 
-Prints a table and writes `suggestions.json`. `--url` is the post's final live URL
-(excluded from its own target selection). Example:
+Prints the ranked shortlist and writes `suggestions.json`. `--url` is the post's
+final live URL (excluded from its own candidate set). Example:
 
 ```
-PARA  CONF  ANCHOR                    TARGET
-   1  1.00  cart abandonment          https://www.gokwik.co/blog/how-to-avoid-and-overcome-cart-abandonment-losses
+ #  SCORE  PARA  SIGNALS               TARGET
+ 1   10/10     0  title,heading,early   https://www.gokwik.co/blog/what-is-cash-on-delivery
+      What is Cash on Delivery (COD)? Complete Guide for 2026
+ 2    9/10     0  title,heading         https://www.gokwik.co/blog/cash-on-delivery-vs-prepaid-transactions
+      Cash On Delivery Vs Prepaid Transactions: A Strategic Analysis For eCommerce
 ```
 
 ### Web UI
@@ -187,8 +201,9 @@ python cli.py serve            # -> http://127.0.0.1:8000  (or: uvicorn app:app)
 ```
 
 Open http://localhost:8000, paste the post, enter the keyword and URL, and submit.
-The page renders the same suggestions as a table (target URL, title, anchor,
-paragraph index, confidence). `GET /health` returns `{"status":"ok"}`.
+The page renders the same ranked shortlist as a table (rank, score /10, target URL
++ title, anchor, paragraph index, and the signals that fired), with a note that
+these are candidates to pick 1–3 from. `GET /health` returns `{"status":"ok"}`.
 
 ## Tests
 

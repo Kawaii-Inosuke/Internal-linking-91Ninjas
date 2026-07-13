@@ -31,6 +31,9 @@ class Config:
     embed_model: str
     embed_dim: int
     embed_batch_size: int
+    # Max size of the ranked exact-keyword shortlist returned to the human
+    # (TRD §6 Step A, M2 ranked-shortlist). See EXACT_MAX_RESULTS in .env.example.
+    exact_max_results: int
 
     @classmethod
     def from_env(cls, *, load_dotenv_file: bool = True) -> "Config":
@@ -62,12 +65,22 @@ class Config:
                 f"EMBED_BATCH_SIZE must be a positive integer, got {embed_batch_size}."
             )
 
+        # How many ranked candidates the exact-keyword pass returns. This is a
+        # human decision-support shortlist, not an auto-linker, so the default is
+        # small; the writer picks 1-3 from it.
+        exact_max_results = _int_env("EXACT_MAX_RESULTS", 8)
+        if exact_max_results < 1:
+            raise ConfigError(
+                f"EXACT_MAX_RESULTS must be a positive integer, got {exact_max_results}."
+            )
+
         return cls(
             gemini_api_key=os.getenv("GEMINI_API_KEY", ""),
             database_url=os.environ["DATABASE_URL"],
             embed_model=os.getenv("EMBED_MODEL", "BAAI/bge-base-en-v1.5"),
             embed_dim=embed_dim,
             embed_batch_size=embed_batch_size,
+            exact_max_results=exact_max_results,
         )
 
 
