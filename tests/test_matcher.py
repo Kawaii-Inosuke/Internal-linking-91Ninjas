@@ -1,9 +1,9 @@
 """Unit tests for the exact-keyword pass (TRD §6 Step A / §12).
 
-Pure-logic tests: no database and no network. They cover the two pieces of M2
-logic that live outside SQL — first-occurrence anchor location and target
-ranking — plus the ``suggest`` orchestration over a fake DB layer, so the clean
-"no match" outcomes are exercised without a live Postgres.
+Pure-logic tests: no database and no network. They cover the pieces of M2 logic
+that live outside SQL — first-occurrence anchor location and the ranked-shortlist
+scoring/ordering — plus the ``suggest`` orchestration over a fake DB layer, so the
+clean "no match" and "no anchor" outcomes are exercised without a live Postgres.
 """
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ from linker.db import ExactTarget
 from linker.matcher import (
     Paragraph,
     find_first_keyword_paragraph,
-    select_top_target,
+    rank_candidates,
     split_paragraphs,
 )
 
@@ -72,29 +72,132 @@ def test_regex_special_chars_in_keyword_are_literal():
 
 
 # --------------------------------------------------------------------------- #
-# Exact-pass target ranking (mirrors SQL ORDER BY in_title DESC, hits DESC)
+# Ranked-shortlist scoring & ordering
 # --------------------------------------------------------------------------- #
-def _target(page_id: int, hits: int, in_title: bool) -> ExactTarget:
+def _target(
+    page_id: int,
+    *,
+    hits: int,
+    in_title: bool,
+    first_chunk_index: int = 0,
+    matched_content: str = "",
+) -> ExactTarget:
     return ExactTarget(
-        page_id=page_id, url=f"https://x/{page_id}", title="t", hits=hits, in_title=in_title
+        page_id=page_id,
+        url=f"https://x/{page_id}",
+        title=f"title {page_id}",
+        hits=hits,
+        in_title=in_title,
+        first_chunk_index=first_chunk_index,
+        matched_content=matched_content,
     )
 
 
-def test_title_match_beats_higher_hit_count():
-    # An in-title page wins even though the other has far more body hits.
-    candidates = [_target(1, hits=50, in_title=False), _target(2, hits=1, in_title=True)]
-    top = select_top_target(candidates)
-    assert top is not None and top.page_id == 2
+def _rank(candidates, keyword="cash on delivery", max_results=8):
+    return rank_candidates(
+        candidates,
+        keyword=keyword,
+        anchor_text=keyword,
+        doc_paragraph_index=0,
+        max_results=max_results,
+    )
 
 
-def test_among_equal_title_status_more_hits_wins():
-    candidates = [_target(1, hits=3, in_title=False), _target(2, hits=9, in_title=False)]
-    top = select_top_target(candidates)
-    assert top is not None and top.page_id == 2
+def test_title_early_match_outranks_frequency_only_match():
+    # A keyword-in-title page that leads with the keyword must beat a page that
+    # merely repeats it many times in its body (frequency is the weakest signal).
+    canonical = _target(
+        1, hits=3, in_title=True, first_chunk_index=0,
+        matched_content="cash on delivery is the default payment method.",
+    )
+    frequency_only = _target(
+        2, hits=50, in_title=False, first_chunk_index=6,
+        matched_content="... " * 40 + "cash on delivery appears late here.",
+    )
+    ranked = _rank([frequency_only, canonical])
+    assert [s.target_url for s in ranked] == ["https://x/1", "https://x/2"]
+    assert ranked[0].rank == 1 and ranked[1].rank == 2
 
 
-def test_empty_candidates_returns_none():
-    assert select_top_target([]) is None
+def test_canonical_guide_beats_comparison_post_on_frequency():
+    # The real gokwik case: both posts have the keyword in the title, but the
+    # comparison post repeats it more often (higher hits) while the canonical
+    # guide leads with it (chunk 0). The guide must still win — repetition is not
+    # authority.
+    guide = _target(
+        1, hits=12, in_title=True, first_chunk_index=0,
+        matched_content="cash on delivery (COD) remains the preferred option.",
+    )
+    comparison = _target(
+        2, hits=15, in_title=True, first_chunk_index=1,
+        matched_content="Later on, cash on delivery vs prepaid is compared.",
+    )
+    ranked = _rank([comparison, guide])
+    assert ranked[0].target_url == "https://x/1"  # the canonical guide, not the comparison
+
+
+def test_keyword_in_heading_boosts_rank():
+    # Between two otherwise-equal body-only mentions, a keyword in a heading wins.
+    with_heading = _target(
+        1, hits=2, in_title=False, first_chunk_index=2,
+        matched_content="What is cash on delivery?\nA short explainer follows here.",
+    )
+    without_heading = _target(
+        2, hits=2, in_title=False, first_chunk_index=2,
+        matched_content="Somewhere in this long prose paragraph we mention cash on delivery in passing today.",
+    )
+    ranked = _rank([without_heading, with_heading])
+    assert ranked[0].target_url == "https://x/1"
+    assert matcher.SIGNAL_HEADING in ranked[0].signals_present
+    assert matcher.SIGNAL_HEADING not in ranked[1].signals_present
+
+
+def test_signals_present_reports_fired_signals():
+    target = _target(
+        1, hits=4, in_title=True, first_chunk_index=0,
+        matched_content="What is cash on delivery?\nCash on delivery explained.",
+    )
+    (row,) = _rank([target])
+    assert set(row.signals_present) == {
+        matcher.SIGNAL_TITLE,
+        matcher.SIGNAL_HEADING,
+        matcher.SIGNAL_EARLY,
+    }
+
+
+def test_score_is_integer_between_0_and_10():
+    candidates = [
+        _target(1, hits=12, in_title=True, first_chunk_index=0, matched_content="cash on delivery guide"),
+        _target(2, hits=1, in_title=False, first_chunk_index=9, matched_content="x " * 50 + "cash on delivery"),
+        _target(3, hits=50, in_title=True, first_chunk_index=0, matched_content="cash on delivery cash on delivery"),
+    ]
+    for row in _rank(candidates):
+        assert isinstance(row.score_out_of_10, int)
+        assert 0 <= row.score_out_of_10 <= 10
+
+
+def test_top_row_scores_at_or_near_ten():
+    # A page that fires every signal should land at the top of the 0-10 scale.
+    perfect = _target(
+        1, hits=20, in_title=True, first_chunk_index=0,
+        matched_content="What is cash on delivery?\ncash on delivery is defined here.",
+    )
+    (row,) = _rank([perfect])
+    assert row.score_out_of_10 >= 9
+
+
+def test_max_results_caps_the_shortlist_and_numbers_ranks():
+    candidates = [
+        _target(i, hits=i, in_title=(i % 2 == 0), matched_content="cash on delivery")
+        for i in range(1, 21)  # 20 candidates
+    ]
+    ranked = _rank(candidates, max_results=8)
+    assert len(ranked) == 8
+    assert [s.rank for s in ranked] == list(range(1, 9))
+
+
+def test_empty_candidates_yields_empty_shortlist():
+    assert _rank([]) == []
 
 
 # --------------------------------------------------------------------------- #
@@ -111,9 +214,9 @@ class _FakeDB:
     def get_client_id(self, conn, name):
         return self._client_id
 
-    def find_exact_target_candidates(self, conn, client_id, keyword, current_url):
-        # Record the client_id filter to assert client isolation is honoured.
-        self.calls.append((client_id, keyword, current_url))
+    def find_exact_target_candidates(self, conn, client_id, keyword, current_url, limit):
+        # Record the client_id filter + exclusion + pool size to assert isolation.
+        self.calls.append((client_id, keyword, current_url, limit))
         return self._candidates
 
 
@@ -130,29 +233,71 @@ def patch_db(monkeypatch):
 _POST = "Intro paragraph.\nReducing cart abandonment lifts revenue.\nOutro."
 
 
-def test_suggest_happy_path(patch_db):
-    fake = patch_db(client_id=7, candidates=[_target(42, hits=5, in_title=True)])
+def test_suggest_happy_path_returns_ranked_shortlist(patch_db):
+    fake = patch_db(
+        client_id=7,
+        candidates=[
+            _target(42, hits=5, in_title=True, first_chunk_index=0,
+                    matched_content="cart abandonment is a big problem."),
+            _target(99, hits=2, in_title=False, first_chunk_index=4,
+                    matched_content="x " * 30 + "cart abandonment"),
+        ],
+    )
     result = matcher.suggest(
         conn=None,
         client="gokwik",
         keyword="cart abandonment",
         post_text=_POST,
         current_url="https://x/new",
+        max_results=8,
     )
     assert result.status == matcher.STATUS_OK
+    assert len(result.suggestions) == 2
+    top = result.suggestions[0]
+    assert top.rank == 1
+    assert top.target_url == "https://x/42"  # title + early beats the body-only page
+    assert top.anchor_text == "cart abandonment"
+    assert top.doc_paragraph_index == 1
+    assert top.match_type == "exact"
+    assert 0 <= top.score_out_of_10 <= 10
+    # The query was scoped to the resolved client_id and excluded the post's URL;
+    # the pool size (>= max_results) was passed through.
+    (client_id, keyword, current_url, limit) = fake.calls[0]
+    assert (client_id, keyword, current_url) == (7, "cart abandonment", "https://x/new")
+    assert limit >= 8
+
+
+def test_suggest_excludes_current_url_via_db_filter(patch_db):
+    fake = patch_db(client_id=7, candidates=[_target(1, hits=1, in_title=True, matched_content="cart abandonment")])
+    matcher.suggest(
+        conn=None,
+        client="gokwik",
+        keyword="cart abandonment",
+        post_text=_POST,
+        current_url="https://x/self",
+    )
+    # current_url is handed to the DB layer, which applies IS DISTINCT FROM.
+    assert fake.calls[0][2] == "https://x/self"
+
+
+def test_suggest_keyword_absent_from_post_still_returns_shortlist(patch_db):
+    patch_db(client_id=7, candidates=[_target(42, hits=5, in_title=True, matched_content="cart abandonment")])
+    result = matcher.suggest(
+        conn=None,
+        client="gokwik",
+        keyword="cart abandonment",
+        post_text="This post never mentions the phrase.",
+        current_url=None,
+    )
+    # Shortlist is returned, but flagged: no anchor location in the new post.
+    assert result.status == matcher.STATUS_NO_ANCHOR
     assert len(result.suggestions) == 1
-    s = result.suggestions[0]
-    assert s.doc_paragraph_index == 1
-    assert s.anchor_text == "cart abandonment"
-    assert s.target_url == "https://x/42"
-    assert s.match_type == "exact"
-    assert s.confidence == 1.0
-    # The query was scoped to the resolved client_id and excluded the post's URL.
-    assert fake.calls == [(7, "cart abandonment", "https://x/new")]
+    assert result.suggestions[0].anchor_text is None
+    assert result.suggestions[0].doc_paragraph_index is None
 
 
 def test_suggest_empty_keyword_is_clean(patch_db):
-    patch_db(client_id=7, candidates=[_target(42, 5, True)])
+    patch_db(client_id=7, candidates=[_target(42, hits=5, in_title=True)])
     result = matcher.suggest(
         conn=None, client="gokwik", keyword="   ", post_text=_POST, current_url=None
     )
@@ -161,7 +306,7 @@ def test_suggest_empty_keyword_is_clean(patch_db):
 
 
 def test_suggest_empty_post_is_clean(patch_db):
-    patch_db(client_id=7, candidates=[_target(42, 5, True)])
+    patch_db(client_id=7, candidates=[_target(42, hits=5, in_title=True)])
     result = matcher.suggest(
         conn=None, client="gokwik", keyword="cart abandonment", post_text="   ", current_url=None
     )
@@ -184,17 +329,4 @@ def test_suggest_no_target_is_clean(patch_db):
         conn=None, client="gokwik", keyword="cart abandonment", post_text=_POST, current_url=None
     )
     assert result.status == matcher.STATUS_NO_TARGET
-    assert result.suggestions == []
-
-
-def test_suggest_keyword_not_in_post_is_clean(patch_db):
-    patch_db(client_id=7, candidates=[_target(42, 5, True)])
-    result = matcher.suggest(
-        conn=None,
-        client="gokwik",
-        keyword="cart abandonment",
-        post_text="This post never mentions the phrase.",
-        current_url=None,
-    )
-    assert result.status == matcher.STATUS_KEYWORD_NOT_IN_POST
     assert result.suggestions == []

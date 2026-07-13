@@ -95,12 +95,22 @@ def _cmd_suggest(args: argparse.Namespace) -> int:
         print(f"No suggestions ({result.status}): {result.message}")
     else:
         print(result.message)
-        print(f"{'PARA':>4}  {'CONF':>4}  {'ANCHOR':<24}  TARGET")
+        print(
+            "These are CANDIDATES to choose from — pick the 1-3 best fits; "
+            "linking every near-duplicate is link-stuffing.\n"
+        )
+        # Score is a heuristic relevance (how canonical the target is), 0-10 —
+        # not a probability. "Signals" shows which cues fired (title/heading/early).
+        print(f"{'#':>2}  {'SCORE':>5}  {'PARA':>4}  {'SIGNALS':<20}  TARGET")
         for s in result.suggestions:
+            para = "-" if s.doc_paragraph_index is None else str(s.doc_paragraph_index)
+            signals = ",".join(s.signals_present) or "-"
             print(
-                f"{s.doc_paragraph_index:>4}  {s.confidence:>4.2f}  "
-                f"{s.anchor_text[:24]:<24}  {s.target_url}"
+                f"{s.rank:>2}  {s.score_out_of_10:>3}/10  {para:>4}  "
+                f"{signals[:20]:<20}  {s.target_url}"
             )
+            if s.target_title:
+                print(f"      {s.target_title}")
 
     SUGGESTIONS_PATH.write_text(
         json.dumps(

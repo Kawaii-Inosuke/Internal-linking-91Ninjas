@@ -32,14 +32,19 @@
     th { font-size: 0.82rem; text-transform: uppercase; letter-spacing: 0.03em; color: #6b7280; }
     td a { color: #2563eb; word-break: break-all; }
     .badge { display: inline-block; padding: 0.1rem 0.5rem; border-radius: 999px; background: #dcfce7; color: #166534; font-size: 0.8rem; font-weight: 600; }
+    .signal { display: inline-block; padding: 0.05rem 0.45rem; margin: 0 0.15rem 0.15rem 0; border-radius: 999px; background: rgba(37,99,235,0.12); color: #1d4ed8; font-size: 0.72rem; font-weight: 600; }
+    .score { font-weight: 700; font-variant-numeric: tabular-nums; }
+    .rank { color: #6b7280; font-variant-numeric: tabular-nums; }
     .result { margin-top: 1.75rem; }
     .note { padding: 0.8rem 1rem; border-radius: 8px; background: rgba(148,163,184,0.15); border: 1px solid #cbd5e1; }
     .note.empty { background: rgba(251,191,36,0.12); border-color: #f59e0b; }
+    .note.tip { background: rgba(37,99,235,0.08); border-color: #93c5fd; margin-bottom: 0.75rem; }
+    .muted { color: #6b7280; }
   </style>
 </head>
 <body>
   <h1>Internal Linking Assistant</h1>
-  <p class="sub">M2 — exact-keyword pass. Paste a new post, give it a keyword, and find the best existing post to link to.</p>
+  <p class="sub">M2 — exact-keyword pass. Paste a new post, give it a keyword, and get a ranked shortlist of existing posts you could link to.</p>
 
   <form method="post" action="/suggest">
     <div class="row">
@@ -66,32 +71,49 @@
   {% if result is not none %}
   <div class="result">
     {% if result.suggestions %}
+      <div class="note tip">
+        These are <strong>candidates to choose from</strong>, ranked by a heuristic
+        relevance <strong>score (0–10)</strong> — how canonical each post is for the
+        keyword, <em>not</em> a probability. Pick the <strong>1–3</strong> best fits;
+        linking every near-duplicate is link-stuffing.
+      </div>
+      {% if result.status == 'no_anchor' %}
+      <div class="note empty">{{ result.message }}</div>
+      {% else %}
+      <p class="muted">{{ result.message }}</p>
+      {% endif %}
       <table>
         <thead>
           <tr>
-            <th>Target URL</th>
-            <th>Target title</th>
-            <th>Anchor text</th>
-            <th>Paragraph</th>
-            <th>Type</th>
-            <th>Confidence</th>
+            <th>#</th>
+            <th>Score</th>
+            <th>Target</th>
+            <th>Anchor</th>
+            <th>Para</th>
+            <th>Signals</th>
           </tr>
         </thead>
         <tbody>
           {% for s in result.suggestions %}
           <tr>
-            <td><a href="{{ s.target_url }}" target="_blank" rel="noopener">{{ s.target_url }}</a></td>
-            <td>{{ s.target_title or '—' }}</td>
-            <td>{{ s.anchor_text }}</td>
-            <td>{{ s.doc_paragraph_index }}</td>
-            <td><span class="badge">{{ s.match_type }}</span></td>
-            <td>{{ '%.2f'|format(s.confidence) }}</td>
+            <td class="rank">{{ s.rank }}</td>
+            <td><span class="score">{{ s.score_out_of_10 }}</span><span class="muted">/10</span></td>
+            <td>
+              <a href="{{ s.target_url }}" target="_blank" rel="noopener">{{ s.target_url }}</a>
+              {% if s.target_title %}<br /><span class="muted">{{ s.target_title }}</span>{% endif %}
+            </td>
+            <td>{{ s.anchor_text or '—' }}</td>
+            <td>{{ s.doc_paragraph_index if s.doc_paragraph_index is not none else '—' }}</td>
+            <td>
+              {% for signal in s.signals_present %}<span class="signal">{{ signal }}</span>{% endfor %}
+              {% if not s.signals_present %}<span class="muted">—</span>{% endif %}
+            </td>
           </tr>
           {% endfor %}
         </tbody>
       </table>
     {% else %}
-      <div class="note empty">No suggestion: {{ result.message }}</div>
+      <div class="note empty">No matches: {{ result.message }}</div>
     {% endif %}
   </div>
   {% endif %}
